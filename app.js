@@ -714,6 +714,7 @@ function buildComplaintReply(name, text, tone, length, seed) {
   const profile = localToneProfiles[tone] || localToneProfiles.warm;
   const keys = analysis.complaints.length ? analysis.complaints : (rating <= 3 ? ['lowRating'] : ['quality']);
   const head = `${(name || '고객').trim()}님, 남겨주신 내용을 확인했습니다.`;
+  const lowRatingApology = rating <= 3 ? '불편을 드려 죄송합니다.' : '';
   const apology = localComplaintLine(keys[0], seed);
   const second = keys[1] ? localComplaintLine(keys[1], seed + 17) : '';
   const checkLines = [
@@ -722,16 +723,18 @@ function buildComplaintReply(name, text, tone, length, seed) {
     '기대하고 주문하신 식사가 만족스럽지 못했던 점을 무겁게 받아들이겠습니다.',
     '남겨주신 경험이 헛되지 않도록 바로 점검하겠습니다.'
   ];
-  const closing = tone === 'bright'
+  const closing = rating <= 3
+    ? '다음에는 더 나은 한 끼로 느끼실 수 있도록 준비 과정을 꼼꼼히 살피겠습니다.'
+    : tone === 'bright'
     ? '불편을 드린 점 다시 한번 죄송합니다. 다음에는 더 나은 식사로 느끼실 수 있게 챙기겠습니다.'
     : tone === 'calm'
       ? '불편을 드린 점 사과드리며, 개선에 반영하겠습니다.'
       : '불편을 드려 죄송합니다. 다음에는 더 나은 한 끼가 되도록 꼭 살피겠습니다.';
   const parts = length === 'short'
-    ? [head, apology]
+    ? [head, lowRatingApology, apology]
     : length === 'medium'
-      ? [head, apology, ratingLine(tone), second || localPick(checkLines, seed, 29), closing]
-      : [head, apology, second, ratingLine(tone), localPick(checkLines, seed, 29), localPick(checkLines, seed, 47), closing];
+      ? [head, lowRatingApology, apology, ratingLine(tone), second || localPick(checkLines, seed, 29), closing]
+      : [head, lowRatingApology, apology, second, ratingLine(tone), localPick(checkLines, seed, 29), localPick(checkLines, seed, 47), closing];
   return trimToTarget(compactSentences(parts).join(' '), length === 'short' ? 105 : length === 'medium' ? 250 : 560);
 }
 
