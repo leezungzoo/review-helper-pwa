@@ -432,8 +432,8 @@ function buildComplaintReply(name, text, tone, length, seed) {
 function isComplaintReview(text) {
   const analysis = replyFactAnalysis(text);
   const explicitComplaint = /맛없|별로|실망|다신|최악|못\s*먹|불친절|배달.{0,12}(늦|느리|오래)|식었|차갑|미지근|누락|빠졌|안\s*왔|샜|쏟/.test(text);
-  // 별점이 높아도 명확한 불만 문장이 있으면 그 불만을 먼저 답한다.
-  return rating <= 2 || explicitComplaint;
+  // 별점이 3개 이하면 명확한 불만 문장이 없어도 아쉬운 리뷰로 답한다.
+  return rating <= 3 || explicitComplaint;
 }
 
 const localToneProfiles = {
@@ -638,6 +638,7 @@ const localFactLines = {
 };
 
 const localComplaintLines = {
+  lowRating: ['별점으로 남겨주신 아쉬운 마음을 무겁게 확인했습니다.', '만족스럽게 드셨다고 보기 어려운 평가라 더 꼼꼼히 돌아보겠습니다.', '말씀은 짧아도 별점에 담긴 아쉬움을 가볍게 넘기지 않겠습니다.'],
   missing: ['빠진 구성이 있었다면 식사 전부터 많이 당황스러우셨을 것 같습니다.', '주문하신 구성에 누락이 있었다는 점을 무겁게 확인했습니다.', '기대하고 열어보셨을 텐데 빠진 부분이 있어 불편하셨겠습니다.'],
   deliverySlow: ['기다리시는 시간이 길어져 식사 흐름이 불편해지셨을 것 같습니다.', '배달 지연으로 불편을 드린 점 죄송합니다.', '예상보다 늦게 받아보셔서 많이 답답하셨을 것 같습니다.'],
   cold: ['따뜻하게 드셨어야 할 음식이 식어 있었다면 실망이 크셨을 것 같습니다.', '음식 온도가 만족스럽지 못했던 점 죄송합니다.', '알맞은 상태로 드시지 못하게 된 부분을 무겁게 받아들이겠습니다.'],
@@ -711,7 +712,7 @@ function buildPositiveReply(name, text, tone, length, seed) {
 function buildComplaintReply(name, text, tone, length, seed) {
   const analysis = replyFactAnalysis(text);
   const profile = localToneProfiles[tone] || localToneProfiles.warm;
-  const keys = analysis.complaints.length ? analysis.complaints : ['quality'];
+  const keys = analysis.complaints.length ? analysis.complaints : (rating <= 3 ? ['lowRating'] : ['quality']);
   const head = `${(name || '고객').trim()}님, 남겨주신 내용을 확인했습니다.`;
   const apology = localComplaintLine(keys[0], seed);
   const second = keys[1] ? localComplaintLine(keys[1], seed + 17) : '';
@@ -895,10 +896,108 @@ async function recoverNickname(file,data){
   const retryEntries=(retry.data.lines||[]).map(line=>({text:cleanOcrLine(line.text||''),box:line.bbox||{x0:0,y0:0,x1:0,y1:0}})).filter(line=>line.text);
   return retryEntries.filter(line=>isName(line.text)).sort((a,b)=>a.box.y0-b.box.y0)[0]?.text||'';
 }
-async function detectStarRating(file){
-  const bitmap=await createImageBitmap(file); const canvas=document.createElement('canvas'); const scale=Math.min(1,900/bitmap.width); canvas.width=Math.round(bitmap.width*scale); canvas.height=Math.round(bitmap.height*scale); const ctx=canvas.getContext('2d',{willReadFrequently:true}); ctx.drawImage(bitmap,0,0,canvas.width,canvas.height); const {data}=ctx.getImageData(0,Math.round(canvas.height*.18),canvas.width,Math.round(canvas.height*.52)); const w=canvas.width,h=Math.round(canvas.height*.52), seen=new Uint8Array(w*h), groups=[]; const yellow=i=>data[i]>175&&data[i+1]>115&&data[i+1]<210&&data[i+2]<125&&data[i]-data[i+2]>85;
-  for(let p=0;p<w*h;p++){if(seen[p]||!yellow(p*4))continue;let stack=[p],count=0,minX=w,maxX=0,minY=h,maxY=0;seen[p]=1;while(stack.length){const q=stack.pop(),x=q%w,y=(q/w)|0;count++;minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);for(const n of [q-1,q+1,q-w,q+w])if(n>=0&&n<w*h&&!seen[n]&&yellow(n*4)){seen[n]=1;stack.push(n);}}if(count>35&&maxX-minX>7&&maxY-minY>7&&maxX-minX<70&&maxY-minY<70)groups.push({count,minX,minY});}
-  return Math.min(5,groups.filter(g=>g.count>70).length);
+class StarRatingDetector {
+  constructor(file) {
+    this.file = file;
+  }
+
+  async detect() {
+    const bitmap = await createImageBitmap(this.file);
+    const canvas = this.createCanvas(bitmap);
+    const crop = this.cropRatingArea(canvas);
+    return this.normalizeRating(this.countFilledStars(crop));
+  }
+
+  createCanvas(bitmap) {
+    const scale = Math.min(1, 1000 / bitmap.width);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d', {willReadFrequently: true}).drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  }
+
+  cropRatingArea(canvas) {
+    const y = Math.round(canvas.height * .12);
+    const h = Math.round(canvas.height * .58);
+    return {image: canvas.getContext('2d', {willReadFrequently: true}).getImageData(0, y, canvas.width, h), width: canvas.width, height: h};
+  }
+
+  isFilledStarPixel(data, i) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const yellow = r > 170 && g > 105 && g < 220 && b < 145 && r - b > 70;
+    const orange = r > 190 && g > 85 && g < 180 && b < 110 && r - g > 25;
+    return yellow || orange;
+  }
+
+  countFilledStars({image, width, height}) {
+    const {data} = image;
+    const seen = new Uint8Array(width * height);
+    const groups = [];
+    for (let p = 0; p < width * height; p++) {
+      if (seen[p] || !this.isFilledStarPixel(data, p * 4)) continue;
+      const group = this.collectGroup(p, data, seen, width, height);
+      if (this.isStarLikeGroup(group)) groups.push(group);
+    }
+    return this.mergeNearbyGroups(groups).length;
+  }
+
+  collectGroup(start, data, seen, width, height) {
+    const stack = [start];
+    const group = {count: 0, minX: width, maxX: 0, minY: height, maxY: 0};
+    seen[start] = 1;
+    while (stack.length) {
+      const point = stack.pop();
+      const x = point % width;
+      const y = (point / width) | 0;
+      group.count++;
+      group.minX = Math.min(group.minX, x);
+      group.maxX = Math.max(group.maxX, x);
+      group.minY = Math.min(group.minY, y);
+      group.maxY = Math.max(group.maxY, y);
+      for (const next of [point - 1, point + 1, point - width, point + width]) {
+        if (next < 0 || next >= width * height || seen[next]) continue;
+        if (this.isFilledStarPixel(data, next * 4)) {
+          seen[next] = 1;
+          stack.push(next);
+        }
+      }
+    }
+    group.width = group.maxX - group.minX + 1;
+    group.height = group.maxY - group.minY + 1;
+    group.centerX = (group.minX + group.maxX) / 2;
+    group.centerY = (group.minY + group.maxY) / 2;
+    return group;
+  }
+
+  isStarLikeGroup(group) {
+    const area = group.width * group.height;
+    const fillRatio = group.count / Math.max(area, 1);
+    return group.count >= 45
+      && group.width >= 8
+      && group.height >= 8
+      && group.width <= 90
+      && group.height <= 90
+      && fillRatio > .12
+      && fillRatio < .85
+      && Math.abs(group.width - group.height) <= Math.max(group.width, group.height) * .7;
+  }
+
+  mergeNearbyGroups(groups) {
+    return groups
+      .sort((a, b) => a.centerX - b.centerX)
+      .filter((group, index, sorted) => !index || group.centerX - sorted[index - 1].centerX > Math.max(group.width, sorted[index - 1].width) * .55)
+      .slice(0, 5);
+  }
+
+  normalizeRating(value) {
+    if (!Number.isFinite(value) || value < 1) return 0;
+    return Math.max(1, Math.min(5, Math.round(value)));
+  }
+}
+
+async function detectStarRating(file) {
+  return new StarRatingDetector(file).detect();
 }
 $('#saveStore').onclick=()=>{stores[activeStore]={name:$('#storeName').value.trim(),note:$('#storeNote').value.trim()};localStorage.setItem('review-helper-stores',JSON.stringify(stores));renderStores();alert('가게 정보를 저장했습니다.');};
 $('#generate').onclick=generate;
